@@ -1,0 +1,309 @@
+---
+title: "Stubhub Upto=1"
+author: "Braden J. Poe"
+date: "12/10/2019"
+output: html_document
+---
+
+```{r loading}
+rm(list=ls())
+
+require("data.table")
+require("glmnet")
+require("ggplot2")
+require("qwraps2")
+require("caret")
+require("stargazer")
+require("xtable")
+require("knitr")
+require("DALEX")
+require("gridExtra")
+require("h2o")
+data=readRDS("C:/Users/poe75/Documents/Documents/Grad School/Econ 690 ML/Project Files/stubhub_panel.rds")
+
+# Subset the data so we only have upto = 1. 
+data$pricenum = (data$buyerpricenum + data$sellerpricenum)/2
+## Begin with price
+df_price=within(data.frame(data),remove("buyerpricenum","sellerpricenum","ticketidnum","expatt","newgameid","home","away","awaydiv","awayleague",
+                                      "homediv","homeleague","gamehomerecord","gameawayrecord"))
+df_price = df_price[which(data$upto==1),]
+
+# Attendance dataframe with the same subset
+df_att=within(data.frame(data),remove("buyerpricenum","sellerpricenum","ticketidnum","expatt","newgameid","home","away","awaydiv","awayleague",
+                                      "homediv","homeleague","gamehomerecord","gameawayrecord","pricenum"))
+df_att = df_att[which(df_att$upto==1),]
+```
+
+
+```{r}
+# Set up training and test sets, which will be the same for att and price
+df_att=df_att[complete.cases(df_att),]
+set.seed(0)
+ntest=0.3*nrow(df_att)
+test_ind=sample.int(nrow(df_att),ntest)
+train=df_att[-test_ind,]
+test=df_att[test_ind,]
+```
+
+```{r Attendance Summary}
+##summary statistics of all covariates
+#stargazer(df_att, title='Attendance summary statistics',summary=TRUE)
+
+
+matrix_att_train=data.matrix(train,rownames.force=TRUE)
+x=matrix_att_train[,2:ncol(matrix_att_train)]
+y=matrix_att_train[,1]
+matrix_att_test=data.matrix(test,rownames.force=TRUE)
+```
+
+```{r Price summary }
+##summary statistics of all covariates
+stargazer(df_price, title='Price summary statistics')
+
+
+matrix_att_train=data.matrix(train,rownames.force=TRUE)
+x=matrix_att_train[,2:ncol(matrix_att_train)]
+y=matrix_att_train[,1]
+matrix_att_test=data.matrix(test,rownames.force=TRUE)
+```
+
+```{r Attendance Ridge}
+#CV ridge, attendance
+ridge_att=cv.glmnet(x,y,alpha=0,type.measure="mse")
+bestlam=ridge_att$lambda.min
+cat("Optimal lambda for CV ridge:",bestlam,"\n")
+y_pred_train=predict(ridge_att,s=bestlam,newx=x)
+mseridge_train_att=sqrt(mean((train$att-y_pred_train)^2))/mean(train$att)
+cat("Train root MSE (normalized) for CV ridge (attendance):",mseridge_train_att,"\n")
+# 0.2050872 
+
+#plot(ridge_att)
+#coef(ridge_att,bestlam)
+
+x_new=matrix_att_test[,2:ncol(matrix_att_test)]
+y_pred=predict(ridge_att,s=bestlam,newx=x_new)
+mseridge_att=sqrt(mean((test$att-y_pred)^2))/mean(test$att)
+cat("Test root MSE (normalized) for CV ridge (attendance):",mseridge_att,"\n")
+# 0.2051895 
+cat("Coefficients for CV ridge (attendance):","\n")
+coef(ridge_att,bestlam)
+```
+
+```{r Attendance Lasso}
+#CV lasso, attendance
+lasso_att=cv.glmnet(x,y,alpha=1,type.measure="mse")
+bestlam=lasso_att$lambda.min
+cat("Optimal lambda for CV lasso:",bestlam,"\n")
+y_pred_train=predict(lasso_att,s=bestlam,newx=x)
+mselasso_train_att=sqrt(mean((train$att-y_pred_train)^2))/mean(train$att)
+cat("Train root MSE (normalized) for CV lasso (attendance):",mselasso_train_att,"\n")
+#
+
+###plot(lasso_att)
+###coef(lasso_att,bestlam)
+
+x_new=matrix_att_test[,2:ncol(matrix_att_test)]
+y_pred=predict(lasso_att,s=bestlam,newx=x_new)
+mselasso_att=sqrt(mean((test$att-y_pred)^2))/mean(test$att)
+cat("Test root MSE (normalized) for CV lasso (attendance):",mselasso_att,"\n")
+#0.202611 
+cat("Coefficients for CV lasso (attendance):","\n")
+coef(lasso_att,bestlam)
+
+```
+
+```{r Attendance RF}
+
+#random forests (attendance)
+h2o.removeAll()
+h2o.init()
+
+h2o_train=as.h2o(train)
+h2o_test=as.h2o(test)
+
+random_forest=h2o.randomForest(
+  x=2:ncol(df_att),
+  y=1,
+  training_frame=h2o_train,
+  validation_frame=h2o_test,
+  ntrees=50,
+  mtries=4
+)
+mserf_att=sqrt(h2o.mse(random_forest,valid=T))/mean(test$att)
+cat("Test root MSE (normalized) for random forest (attendance):",mserf_att,"\n")
+#0.1227283  
+
+z=h2o.predict(random_forest,h2o_test)
+predrf_att=as.data.frame(z)
+cat("Variable importance, random forest (attendance):","\n")
+print(as.data.frame(h2o.varimp(random_forest)))
+
+#random forest with only 10 most important covariates (attendance)
+train=train[,c("att","homewildgameback","regprice","homegameback","homerecord","numbsection","dowgame","homegametogo","numbrow","awaygametogo","monthgame")]
+test=test[,c("att","homewildgameback","regprice","homegameback","homerecord","numbsection","dowgame","homegametogo","numbrow","awaygametogo","monthgame")]
+h2o.no_progress()
+h2o.init()
+h2o_train=as.h2o(train)
+h2o_test=as.h2o(test)
+
+random_forest2=h2o.randomForest(
+  x=2:ncol(df_att),
+  y=1,
+  training_frame=h2o_train,
+  validation_frame=h2o_test,
+  ntrees=50,
+  mtries=4
+)
+
+pred <- function(model, data)  {
+  results <- sapply(as.vector(as.data.frame(h2o.predict(model, as.h2o(data)))),as.numeric)
+  return(results)
+}
+explainer_rf_att = explain(
+  model = random_forest2,
+  data = head(test[,2:ncol(test)],100),
+  y = as.vector(as.numeric(head(test[,1],100))),
+  predict_function = pred,
+  label = "h2o rf (attendance)"
+)
+#partial dependences for top 5 most important covariates
+library(pdp)
+pdp_rf1=variable_response(explainer_rf_att,variable="homewildgameback",type="pdp")
+pdp_rf2=variable_response(explainer_rf_att,variable="regprice",type="pdp")
+pdp_rf3=variable_response(explainer_rf_att,variable="homegameback",type="pdp")
+pdp_rf4=variable_response(explainer_rf_att,variable="homerecord",type="pdp")
+pdp_rf5=variable_response(explainer_rf_att,variable="numbsection",type="pdp")
+grid.arrange(plot(pdp_rf1),plot(pdp_rf2),plot(pdp_rf3),plot(pdp_rf4),nrow=2)
+
+```
+
+```{r}
+
+df_price=df_price[complete.cases(df_price),]
+
+set.seed(0)
+ntest=0.3*nrow(df_price)
+test_ind=sample.int(nrow(df_price),ntest)
+train=df_price[-test_ind,]
+test=df_price[test_ind,]
+
+matrix_price_train=data.matrix(train,rownames.force=TRUE)
+x=matrix_price_train[,1:ncol(matrix_price_train)-1]
+y=matrix_price_train[,ncol(matrix_price_train)]
+matrix_price_test=data.matrix(test,rownames.force=TRUE)
+```
+
+```{r Price Ridge}
+#CV ridge, price
+ridge_price=cv.glmnet(x,y,alpha=0,type.measure="mse")
+bestlam=ridge_price$lambda.min
+cat("Optimal lambda for CV ridge:",bestlam,"\n")
+y_pred_train=predict(ridge_price,s=bestlam,newx=x)
+mseridge_train_price=sqrt(mean((train$pricenum-y_pred_train)^2))/mean(train$pricenum)
+cat("Train root MSE (normalized) for CV ridge (price):",mseridge_train_price,"\n")
+# 0.7637503  
+
+###plot(ridge_price)
+###coef(ridge_price,bestlam)
+
+x_new=matrix_price_test[,1:ncol(matrix_price_test)-1]
+y_pred=predict(ridge_price,s=bestlam,newx=x_new)
+mseridge_price=sqrt(mean((test$pricenum-y_pred)^2))/mean(test$pricenum)
+cat("Test root MSE (normalized) for CV ridge (price):",mseridge_price,"\n")
+# 0.7617781 
+cat("Coefficients for CV ridge (price):","\n")
+coef(ridge_price,bestlam)
+```
+
+```{r Price Lasso}
+#CV lasso, price
+lasso_price=cv.glmnet(x,y,alpha=1,type.measure="mse")
+bestlam=lasso_price$lambda.min
+cat("Optimal lambda for CV lasso:",bestlam,"\n")
+y_pred_train=predict(lasso_price,s=bestlam,newx=x)
+mselasso_train_price=sqrt(mean((train$pricenum-y_pred_train)^2))/mean(train$pricenum)
+cat("Train root MSE (normalized) for CV lasso (price):",mselasso_train_price,"\n")
+# 0.7623467  
+
+###plot(lasso_price)
+###coef(lasso_price,bestlam)
+
+x_new=matrix_price_test[,1:ncol(matrix_price_test)-1]
+y_pred=predict(lasso_price,s=bestlam,newx=x_new)
+mselasso_price=sqrt(mean((test$pricenum-y_pred)^2))/mean(test$pricenum)
+cat("Test root MSE (normalized) for CV lasso (price):",mselasso_price,"\n")
+#0.7603042 
+cat("Coefficients for CV lasso (price):","\n")
+coef(lasso_price,bestlam)
+
+```
+
+
+```{r Price Random Forest }
+#random forests (price)
+h2o.removeAll()
+h2o.init()
+
+h2o_train=as.h2o(train)
+h2o_test=as.h2o(test)
+
+random_forest=h2o.randomForest(
+  y=97,
+  training_frame=h2o_train,
+  validation_frame=h2o_test,
+  ntrees=50,
+  mtries=4
+)
+mserf_price=sqrt(h2o.mse(random_forest,valid=T))/mean(test$pricenum)
+
+z=h2o.predict(random_forest,h2o_test)
+predrf_price=as.data.frame(z)
+cat("Test root MSE (normalized) for random forest (price):",mserf_price,"\n")
+#0.6008756  
+cat("Variable importance, random forest (price):","\n")
+print(as.data.frame(h2o.varimp(random_forest)))
+
+explainer_rf_price = explain(
+  model = random_forest,
+  data = test[,1:ncol(test)-1],
+  y = test[,ncol(test)],
+  predict_function = predrf_price,
+  label = "h2o rf (price)"
+)
+
+#random forest with only 10 most important covariates (price)
+train=train[,c("pricenum","regprice","numbsection","homegameahead","numbrow","dtg","homerecord","dowgame","numb","awayrecord","awaygametogo")]
+test=test[,c("pricenum","regprice","numbsection","homegameahead","numbrow","dtg","homerecord","dowgame","numb","awayrecord","awaygametogo")]
+h2o.no_progress()
+h2o.init()
+h2o_train=as.h2o(train)
+h2o_test=as.h2o(test)
+
+random_forest2=h2o.randomForest(
+  x=2:11,
+  y=1,
+  training_frame=h2o_train,
+  validation_frame=h2o_test,
+  ntrees=50,
+  mtries=4
+)
+
+pred <- function(model, data)  {
+  results <- sapply(as.vector(as.data.frame(h2o.predict(model, as.h2o(data)))),as.numeric)
+  return(results)
+}
+explainer_rf_att = explain(
+  model = random_forest2,
+  data = head(test[,2:ncol(test)],100),
+  y = as.vector(as.numeric(head(test[,1],100))),
+  predict_function = pred,
+  label = "h2o rf (prices)"
+)
+#partial dependences for top 4 most important covariates
+library(pdp)
+pdp_rf1=variable_response(explainer_rf_att,variable="regprice",type="pdp")
+pdp_rf2=variable_response(explainer_rf_att,variable="numbsection",type="pdp")
+pdp_rf3=variable_response(explainer_rf_att,variable="homegameahead",type="pdp")
+pdp_rf4=variable_response(explainer_rf_att,variable="numbrow",type="pdp")
+grid.arrange(plot(pdp_rf1),plot(pdp_rf2),plot(pdp_rf3),plot(pdp_rf4),nrow=2)
+```
